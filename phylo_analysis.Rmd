@@ -1,0 +1,245 @@
+---
+title: "Phylo"
+output: html_document
+date: "2024-03-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)  # plots
+library(viridis)  # colors 
+library(scales)
+library(plyr)
+library(ggh4x)
+library(magrittr)
+library(dplyr)
+
+standard_theme <-  ggplot2::theme(panel.background = element_rect(fill='white', colour='black')) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+## Load data
+
+```{r}
+setwd("~")
+host_snap <- read.csv("small_host_munged_file.dat", h=T)
+sym_snap <- read.csv("small_sym_munged_file.dat", h=T)
+#sym_snap <- read.csv("sym_ancestors_file.csv", h=T)
+int_snap <- read.csv("small_int_munged_file.dat", h=T)
+```
+
+## Configure data
+
+### Find the first mutualistic partnerships
+
+```{r}
+# right now only care about info
+host_snap <- select(host_snap, id, info, ancestor_list, origin_time, mut_rate, seed, mut_size)
+sym_snap <- select(sym_snap, id, info, ancestor_list, origin_time, mut_rate, seed, mut_size)
+
+# rename columns to prepare for a join (this is for whole-file join)
+'
+for(colname in names(host_snap)){
+  new_colname <- paste0("host_", colname)
+  names(host_snap)[names(host_snap) == colname] <- new_colname
+}
+
+for(colname in names(sym_snap)){
+  new_colname <- paste0("sym_", colname)
+  names(sym_snap)[names(sym_snap) == colname] <- new_colname
+}
+'
+
+
+names(host_snap)[names(host_snap) == "id"] <- "host"
+names(host_snap)[names(host_snap) == "info"] <- "host_info"
+names(host_snap)[names(host_snap) == "origin_time"] <- "host_origin_time"
+names(host_snap)[names(host_snap) == "ancestor_list"] <- "host_ancestor_list"
+
+names(sym_snap)[names(sym_snap) == "id"] <- "symbiont"
+names(sym_snap)[names(sym_snap) == "info"] <- "sym_info"
+names(sym_snap)[names(sym_snap) == "origin_time"] <- "sym_origin_time"
+names(sym_snap)[names(sym_snap) == "ancestor_list"] <- "sym_ancestor_list"
+
+# join the tables into one
+mut_partners <- merge(int_snap, sym_snap, by=c("symbiont","seed","mut_size","mut_rate"))
+mut_partners <- merge(mut_partners, host_snap, by=c("host","seed","mut_size","mut_rate"))
+
+# extract date of later org evolution
+mut_partners <- data.frame( mut_partners, 
+                latest_origin_time = apply( mut_partners[c('sym_origin_time', 'host_origin_time')], 1, max ) )
+
+# drop extra cols
+#mut_partners <- subset(mut_partners, select=-c(sym_mut_size, sym_mut_rate, sym_seed, host_mut_size, host_mut_rate, host_seed))
+```
+
+
+```{r}
+# filter all partnerships which are mutualistic
+mut_partners <- subset(mut_partners, host_info >= 12 & sym_info >= 12)
+
+# select the first mutualism in each condition
+mut_partners <- mut_partners %>%
+  group_by(across(all_of(c("mut_size","mut_rate","seed")))) %>%
+  slice(which.min(latest_origin_time))
+
+```
+
+
+```{r}
+#mut_size01 <- mut_partners
+#mut_size005 <- mut_partners
+#mut_size015 <- mut_partners
+#mut_size05 <- mut_partners
+#mut_size1 <- mut_partners
+
+
+#mut_partners <- rbind(mut_size01, mut_size005, mut_size015, mut_size05, mut_size1)
+```
+
+### Extract interaction values for ancestors of mutualistic partners
+
+```{r}
+# ancestors are in list form but are singles--presumably that's for sexual reproduction. Does not seem aplicable in this case.
+mut_partners$sym_ancestor_list <- sub("\\[", "", mut_partners$sym_ancestor_list)
+mut_partners$sym_ancestor_list <- sub("\\]", "", mut_partners$sym_ancestor_list)
+mut_partners$host_ancestor_list <- sub("\\[", "", mut_partners$host_ancestor_list)
+mut_partners$host_ancestor_list <- sub("\\]", "", mut_partners$host_ancestor_list)
+
+# join in the info values for the host ancestors
+temp_table <- host_snap %>% 
+      dplyr::filter(host_snap$host %in% mut_partners$host_ancestor_list) 
+
+names(temp_table)[names(temp_table) == "host_info"] <- "host_ancestor_info"
+names(temp_table)[names(temp_table) == "host"] <- "host_ancestor_list"
+
+mut_partners <- merge(mut_partners, 
+                      temp_table[, c("host_ancestor_list", "host_ancestor_info", "seed","mut_rate","mut_size")], 
+                      by=c("host_ancestor_list","seed","mut_rate","mut_size"), all.x = TRUE)
+
+
+# join in the info values for the symbiont ancestors
+temp_table <- sym_snap %>% 
+      dplyr::filter(sym_snap$symbiont %in% mut_partners$sym_ancestor_list)
+
+names(temp_table)[names(temp_table) == "sym_info"] <- "sym_ancestor_info"
+names(temp_table)[names(temp_table) == "symbiont"] <- "sym_ancestor_list"
+mut_partners <- merge(mut_partners, temp_table[, c("sym_ancestor_list", "sym_ancestor_info", "seed","mut_rate","mut_size")], 
+                      by=c("sym_ancestor_list","seed","mut_rate","mut_size"), all.x = TRUE)
+
+
+```
+
+### Add label columns
+
+```{r}
+
+# exact parent bins
+mut_partners$ancestor_info <- paste0(mut_partners$sym_ancestor_info, "-", mut_partners$host_ancestor_info)
+
+# grouped parent bins
+mut_partners$sym_ancestor_bin <- "mut"
+mut_partners$sym_ancestor_bin <- ifelse(mut_partners$sym_ancestor_info > 7 & mut_partners$sym_ancestor_info < 12, 
+                                        "neut", mut_partners$sym_ancestor_bin)
+mut_partners$sym_ancestor_bin <- ifelse(mut_partners$sym_ancestor_info <= 7, 
+                                        "ant", mut_partners$sym_ancestor_bin)
+
+mut_partners$host_ancestor_bin <- "mut"
+mut_partners$host_ancestor_bin <- ifelse(mut_partners$host_ancestor_info > 7 & mut_partners$host_ancestor_info < 12, 
+                                         "neut", mut_partners$host_ancestor_bin)
+mut_partners$host_ancestor_bin <- ifelse(mut_partners$host_ancestor_info <= 7, 
+                                         "ant", mut_partners$host_ancestor_bin)
+
+mut_partners$ancestor_bins <- paste0(mut_partners$sym_ancestor_bin, "-", mut_partners$host_ancestor_bin)
+
+```
+
+## Analyze
+
+```{r}
+mut_partners$mut_rate <- as.factor(mut_partners$mut_rate)
+```
+
+### Stacked bar plot of count of mutualistic partnership ancestry categories (NO FREQ)
+
+```{r}
+ggplot(data=mut_partners, 
+      aes(x=seed, fill=ancestor_bins)) +   
+  geom_bar(stat="count") +
+  standard_theme + xlab("Seed") + scale_y_continuous(name="Count of unique partnerships in each category",
+                                                   breaks=seq(0,12,2)) +
+  scale_fill_manual(name="sym-host\nancestor info",  values=plasma(9)) +
+  ggtitle("Ancestor info for mutualisms of info >= 12") + facet_grid(mut_size ~ mut_rate)
+```
+```{r}
+ggplot(data=mut_partners, 
+      aes(x=mut_rate, fill=ancestor_bins)) +   
+  geom_bar(stat="count") +
+  standard_theme + xlab("Mutation rate") + 
+  scale_y_continuous(name="Unique count of partners in each category") +
+  scale_fill_manual(name="sym-host\nancestor info",  values=plasma(9)) +
+  ggtitle("Ancestor behaviour for mutualisms of info >= 12\nsummed across seeds") + facet_grid(~mut_size)
+```
+
+
+### Stacked bar plot of count of mutualistic partnership ancestry categories, weighed by count of orgs
+
+
+#### make bar plot 
+
+```{r}
+mut_partners_compressed <- mut_partners %>%
+    group_by(ancestor_bins, mut_size, mut_rate) %>% 
+              summarise(num_partnerships = n(), # number of unique partnerships
+              total_count = sum(count))  # aggregate number of counts from each inheritance pattern
+
+ggplot(data=mut_partners_compressed, 
+      aes(x=mut_rate, y=total_count, fill=ancestor_bins)) +
+  geom_bar(stat="identity") +
+  standard_theme + xlab("Mutation rate") + 
+  scale_y_continuous(name="Aggregate count of partners in each category") +
+  scale_fill_manual(name="sym-host\nancestor info",  values=plasma(9)) +
+  ggtitle("Ancestor behaviour for mutualisms of info >= 12\nsummed across seeds") + facet_grid(~mut_size)
+```
+
+```{r}
+mut_partners_compressed <- mut_partners %>%
+    group_by(ancestor_info, mut_size, mut_rate) %>% 
+              summarise(num_partnerships = n(), # number of unique partnerships
+              total_count = sum(count))  # aggregate number of counts from each inheritance pattern
+
+ggplot(data=mut_partners_compressed, 
+      aes(x=mut_rate, y=total_count, fill=ancestor_info)) +
+  geom_bar(stat="identity") +
+  standard_theme + xlab("Mutation rate") + 
+  scale_y_continuous(name="Aggregate count of partners in each category") +
+  scale_fill_manual(name="sym-host\nancestor info",  values=plasma(104)) +
+  ggtitle("Ancestor behaviour for mutualisms of info >= 12") + facet_grid(~mut_size)
+```
+
+
+
+```{r}
+ggplot(data=mut_partners, 
+      aes(x=mut_rate, y=latest_origin_time)) +   
+  geom_boxplot() + 
+  geom_point(aes(color=ancestor_bins), shape=19, position=position_jitterdodge(), alpha=0.3) + 
+  standard_theme + facet_grid(~mut_size) + 
+  scale_color_manual(name="sym-host\nancestor info", values=plasma(9)) +
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.2, hjust=0.2)) +xlab("Mutation rate") +
+  ylab("Origin update of first mutualism") +
+  ggtitle("Arrival time of first mutualism\n(pooled across ancestor type)")
+
+ggplot(data=mut_partners, 
+      aes(x=mut_rate, y=latest_origin_time, fill=ancestor_bins)) +   
+  geom_boxplot() + 
+  geom_point(aes(color=ancestor_bins), shape=19, position=position_jitterdodge(), alpha=0.3) + 
+  standard_theme + facet_grid(~mut_size) + 
+  scale_fill_manual(name="sym-host\nancestor info", values=plasma(9)) +
+  scale_color_manual(name="sym-host\nancestor info", values=plasma(9)) +
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.2, hjust=0.2)) +xlab("Mutation rate") +
+  ylab("Origin update of first mutualism") +
+  ggtitle("Arrival time of first mutualism\n(split by ancestor type)")
+
+```
